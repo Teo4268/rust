@@ -11,11 +11,6 @@ COPY . .
 # Build binary thực sự
 RUN cargo build --release
 
-# ====== Stage 2: Runtime (nhỏ gọn) ======
-FROM debian:bookworm-slim
-
-
-
 # Copy binary từ stage build
 COPY --from=builder /app/target/release/rust_proxy /usr/local/bin/rust_proxy
 
