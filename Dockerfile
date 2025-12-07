@@ -14,8 +14,6 @@ RUN cargo build --release
 # Copy binary từ stage build
 COPY --from=builder /app/target/release/rust_proxy /usr/local/bin/rust_proxy
 
-# Expose port nếu service cần
-EXPOSE 8080
 
 # Run chương trình
 CMD ["rust_proxy"]
