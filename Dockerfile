@@ -1,9 +1,14 @@
-FROM rust:1.75 AS builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
 FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY --from=builder /app/target/release/rust_proxy /usr/local/bin/rust_proxy
+
+# Copy file rust_proxy đã build sẵn
+COPY . .
+RUN chmod +x rust_proxy
+
+EXPOSE 8080
+
 CMD ["rust_proxy"]
