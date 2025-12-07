@@ -5,14 +5,13 @@ FROM rust:latest as builder
 
 WORKDIR /app
 
-# Copy Cargo trước để cache dependency
+# Copy danh sách file Cargo trước
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() { println!(\"placeholder\"); }" > src/main.rs
-RUN cargo build --release
-RUN rm -rf src
 
-# Copy source thật và build lại
+# Copy toàn bộ source code
 COPY . .
+
+# Build release
 RUN cargo build --release
 
 # =========================
@@ -25,12 +24,9 @@ RUN apt-get update && apt-get install -y ca-certificates && \
 
 WORKDIR /app
 
-# Tạo thư mục để copy binary
-RUN mkdir -p /app/bin
+# Copy đúng binary
+COPY --from=builder /app/target/release/rust_proxy /app/rust_proxy
 
-# Copy đúng NHẤT 1 file binary
-COPY --from=builder /app/target/release/rust_proxy /app/bin/rust_proxy
-
-# Chạy file
 EXPOSE 8080
-CMD ["/app/bin/rust_proxy"]
+
+CMD ["/app/rust_proxy"]
