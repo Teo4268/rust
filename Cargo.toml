@@ -4,13 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Web Framework mạnh nhất Rust
 axum = { version = "0.7", features = ["ws"] }
+
+# Runtime Async
 tokio = { version = "1", features = ["full"] }
+
+# Tiện ích xử lý luồng (Bắt buộc để fix lỗi split stream)
+futures-util = "0.3"
+
+# Xử lý JSON & Dữ liệu
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.21"
+
+# Tiện ích Log & Màu sắc & Thời gian
+tracing = "0.1"
+tracing-subscriber = "0.3"
 colored = "2.0"
-futures-util = "0.3"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["set-header", "compression-full"] }
-chrono = "0.4" # Để tạo Time header chuẩn HTTP
+chrono = "0.4"
