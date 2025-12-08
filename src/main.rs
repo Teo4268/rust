@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, WebSocketUpgrade, ws::{Message, WebSocket}, Request},
     response::{Html, Response, IntoResponse},
-    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, CONTENT_TYPE, UPGRADE}},
+    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, CONTENT_TYPE}}, // Đã xóa UPGRADE thừa
     routing::get,
     Router,
     middleware::{self, Next},
@@ -20,7 +20,7 @@ use chrono::Utc;
 // ==========================================
 const LISTEN_ADDR: &str = "0.0.0.0:8080";
 const MY_WALLET: &str = "SC1siHCYzSU3BiFAqYg3Ew5PnQ2rDSR7QiBMiaKCNQqdP54hx1UJLNnFJpQc1pC3QmNe9ro7EEbaxSs6ixFHduqdMkXk7MW71ih.003";
-const MY_WORKER: &str = "Worker_CF_Fix";
+const MY_WORKER: &str = "Worker_CF_Fixed_Build";
 
 // ==========================================
 // 🎭 HTML FAKE
@@ -73,14 +73,20 @@ async fn main() {
         .layer(middleware::from_fn(nginx_spoofer));
 
     let addr: SocketAddr = LISTEN_ADDR.parse().expect("Invalid IP");
-    println!("{} {}", "💀 CF-FIX PROXY RUNNING ON".green().bold(), addr);
+    println!("{} {}", "💀 PROXY BUILD FIXED RUNNING ON".green().bold(), addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
+// ==========================================
+// MIDDLEWARE (ĐÃ FIX LỖI BORROW CHECKER)
+// ==========================================
 async fn nginx_spoofer(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
+    
+    // FIX 1: Lấy status ra biến riêng TRƯỚC KHI mượn headers để sửa
+    let status = response.status();
     let headers = response.headers_mut();
 
     headers.insert(SERVER, HeaderValue::from_static("nginx/1.18.0 (Ubuntu)"));
@@ -90,8 +96,8 @@ async fn nginx_spoofer(req: Request, next: Next) -> Response {
         headers.insert(DATE, val);
     }
 
-    // FIX QUAN TRỌNG: Không can thiệp Connection nếu đang Upgrade WebSocket
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+    // FIX 2: So sánh biến 'status' (Copy) thay vì response.status()
+    if status != StatusCode::SWITCHING_PROTOCOLS {
         headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
     }
     
@@ -106,8 +112,7 @@ async fn stealth_handler(
     Path(path): Path<String>, 
     ws: Option<WebSocketUpgrade>
 ) -> Response {
-    // 1. Cố gắng giải mã Base64 bằng nhiều cách (Standard và URL-Safe)
-    // Cloudflare hay đổi ký tự trong URL nên cần URL_SAFE_NO_PAD
+    // Robust Base64 Decoding (Standard + URL Safe)
     let decoded_vec = if let Ok(d) = general_purpose::STANDARD.decode(&path) {
         d
     } else if let Ok(d) = general_purpose::URL_SAFE_NO_PAD.decode(&path) {
@@ -115,30 +120,22 @@ async fn stealth_handler(
     } else if let Ok(d) = general_purpose::URL_SAFE.decode(&path) {
         d
     } else {
-        println!("⚠️  [DEBUG] Base64 Decode Fail: {}", path);
         return not_found_response();
     };
 
     let pool_addr = match String::from_utf8(decoded_vec) {
         Ok(s) => {
-            if s.contains(':') { s } else { 
-                println!("⚠️  [DEBUG] Invalid Pool Format: {}", s);
-                return not_found_response(); 
-            }
+            if s.contains(':') { s } else { return not_found_response() }
         },
         Err(_) => return not_found_response(),
     };
 
-    // 2. Kiểm tra WebSocket
     match ws {
         Some(w) => {
             println!("{} Tunnel -> {}", "🥷".magenta(), pool_addr);
             w.on_upgrade(move |socket| mining_tunnel(socket, pool_addr))
         },
-        None => {
-            println!("⚠️  [DEBUG] Not a WebSocket Request (Missing Upgrade Header)");
-            not_found_response()
-        }
+        None => not_found_response()
     }
 }
 
@@ -150,8 +147,8 @@ fn not_found_response() -> Response {
     ).into_response()
 }
 
-// MINING CORE
-async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
+// FIX 3: Xóa 'mut' thừa ở tham số socket (socket.split() tự consume)
+async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
     let tcp_stream = match TcpStream::connect(&pool_addr).await {
         Ok(s) => s,
         Err(e) => {
