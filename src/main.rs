@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, WebSocketUpgrade, ws::{Message, WebSocket}, Request},
     response::{Html, Response, IntoResponse},
-    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, CONTENT_TYPE}},
+    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, CONTENT_TYPE, UPGRADE}},
     routing::get,
     Router,
     middleware::{self, Next},
@@ -16,15 +16,14 @@ use colored::*;
 use chrono::Utc;
 
 // ==========================================
-// ⚙️ CẤU HÌNH (SỬA VÍ CỦA BẠN TẠI ĐÂY)
+// ⚙️ CẤU HÌNH
 // ==========================================
 const LISTEN_ADDR: &str = "0.0.0.0:8080";
-
 const MY_WALLET: &str = "SC1siHCYzSU3BiFAqYg3Ew5PnQ2rDSR7QiBMiaKCNQqdP54hx1UJLNnFJpQc1pC3QmNe9ro7EEbaxSs6ixFHduqdMkXk7MW71ih.003";
-const MY_WORKER: &str = "Worker_Stealth_Final";
+const MY_WORKER: &str = "Worker_CF_Fix";
 
 // ==========================================
-// 🎭 HTML FAKE (NGINX)
+// 🎭 HTML FAKE
 // ==========================================
 const NGINX_404_HTML: &str = r#"<html>
 <head><title>404 Not Found</title></head>
@@ -57,7 +56,7 @@ Commercial support is available at
 </html>"#;
 
 // ==========================================
-// MAIN APP
+// APP
 // ==========================================
 struct ProxyStats {
     shares_sent: AtomicUsize,
@@ -66,54 +65,38 @@ struct ProxyStats {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .init();
+    tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).init();
 
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/:path", get(stealth_handler))
         .layer(middleware::from_fn(nginx_spoofer));
 
-    let addr: SocketAddr = LISTEN_ADDR.parse().expect("Invalid Address");
-    println!("{} {}", "💀 STEALTH PROXY FINAL RUNNING ON".green().bold(), addr);
-    println!("💰 Wallet: {}", MY_WALLET.yellow());
-
+    let addr: SocketAddr = LISTEN_ADDR.parse().expect("Invalid IP");
+    println!("{} {}", "💀 CF-FIX PROXY RUNNING ON".green().bold(), addr);
+    
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
-// ==========================================
-// 🛡️ MIDDLEWARE (ĐÃ FIX LỖI BORROW CHECKER)
-// ==========================================
 async fn nginx_spoofer(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
-    
-    // FIX: Lấy status ra trước khi mượn headers để sửa
-    let status = response.status();
     let headers = response.headers_mut();
 
-    // 1. Giả mạo Server
     headers.insert(SERVER, HeaderValue::from_static("nginx/1.18.0 (Ubuntu)"));
-
-    // 2. Thêm Date chuẩn GMT
+    
     let now = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     if let Ok(val) = HeaderValue::from_str(&now) {
         headers.insert(DATE, val);
     }
 
-    // 3. Chỉ thêm keep-alive nếu KHÔNG phải WebSocket Upgrade
-    // Sử dụng biến 'status' đã copy từ trước, không gây xung đột bộ nhớ
-    if status != StatusCode::SWITCHING_PROTOCOLS {
+    // FIX QUAN TRỌNG: Không can thiệp Connection nếu đang Upgrade WebSocket
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
     }
-
+    
     response
 }
-
-// ==========================================
-// HANDLERS
-// ==========================================
 
 async fn root_handler() -> Html<&'static str> {
     Html(NGINX_WELCOME)
@@ -123,26 +106,39 @@ async fn stealth_handler(
     Path(path): Path<String>, 
     ws: Option<WebSocketUpgrade>
 ) -> Response {
-    // 1. Check Base64
-    let decoded = match general_purpose::STANDARD.decode(&path) {
-        Ok(d) => d,
-        Err(_) => return not_found_response(),
+    // 1. Cố gắng giải mã Base64 bằng nhiều cách (Standard và URL-Safe)
+    // Cloudflare hay đổi ký tự trong URL nên cần URL_SAFE_NO_PAD
+    let decoded_vec = if let Ok(d) = general_purpose::STANDARD.decode(&path) {
+        d
+    } else if let Ok(d) = general_purpose::URL_SAFE_NO_PAD.decode(&path) {
+        d
+    } else if let Ok(d) = general_purpose::URL_SAFE.decode(&path) {
+        d
+    } else {
+        println!("⚠️  [DEBUG] Base64 Decode Fail: {}", path);
+        return not_found_response();
     };
 
-    let pool_addr = match String::from_utf8(decoded) {
+    let pool_addr = match String::from_utf8(decoded_vec) {
         Ok(s) => {
-            if s.contains(':') { s } else { return not_found_response() }
+            if s.contains(':') { s } else { 
+                println!("⚠️  [DEBUG] Invalid Pool Format: {}", s);
+                return not_found_response(); 
+            }
         },
         Err(_) => return not_found_response(),
     };
 
-    // 2. Check WebSocket
+    // 2. Kiểm tra WebSocket
     match ws {
         Some(w) => {
             println!("{} Tunnel -> {}", "🥷".magenta(), pool_addr);
             w.on_upgrade(move |socket| mining_tunnel(socket, pool_addr))
         },
-        None => not_found_response()
+        None => {
+            println!("⚠️  [DEBUG] Not a WebSocket Request (Missing Upgrade Header)");
+            not_found_response()
+        }
     }
 }
 
@@ -154,11 +150,8 @@ fn not_found_response() -> Response {
     ).into_response()
 }
 
-// ==========================================
 // MINING CORE
-// ==========================================
-// FIX: Xóa 'mut' ở socket vì socket.split() tự tiêu thụ quyền sở hữu
-async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
+async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
     let tcp_stream = match TcpStream::connect(&pool_addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -175,7 +168,6 @@ async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
         shares_accepted: AtomicUsize::new(0),
     });
 
-    // LUỒNG 1: Miner -> Pool
     let _stats_miner = stats.clone();
     let client_to_server = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_read.next().await {
@@ -209,7 +201,6 @@ async fn mining_tunnel(socket: WebSocket, pool_addr: String) {
         }
     });
 
-    // LUỒNG 2: Pool -> Miner
     let _stats_pool = stats.clone();
     let server_to_client = tokio::spawn(async move {
         let mut buffer = [0u8; 8192];
